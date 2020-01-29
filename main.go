@@ -6,6 +6,7 @@ import (
 	"io/ioutil"
 	"net/http"
 	"os"
+	"path/filepath"
 
 	"github.com/gorilla/handlers"
 	"github.com/gorilla/mux"
@@ -42,7 +43,8 @@ func indexHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func versionHandler(w http.ResponseWriter, r *http.Request) {
-	content, err := ioutil.ReadFile("versions.json")
+	path, _ := filepath.Abs("./versions.json")
+	content, err := ioutil.ReadFile(path)
 	if err == nil {
 		w.Write(content)
 	} else {
@@ -63,9 +65,41 @@ func scanSubmissionHandler(w http.ResponseWriter, r *http.Request) {
 	if err := decoder.Decode(&scanRequest); err != nil {
 		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to decode request params"})
 	} else {
-		scanReport, _ := scanningService.ScanImage(scanRequest)
-		json.NewEncoder(w).Encode(scanReport)
+		scanID := scanningService.AsyncScanImage(scanRequest)
+		json.NewEncoder(w).Encode(map[string]string{"scan_id": scanID})
 	}
+}
+
+func scanStatusHandler(w http.ResponseWriter, r *http.Request) {
+	params := mux.Vars(r)
+	w.Header().Add("Content-Type", "application/json")
+
+	status := scanningService.GetScanStatus(params["scan_id"])
+	if status == SCAN_STATUS_ERROR {
+		w.WriteHeader(http.StatusNotFound)
+	}
+
+	json.NewEncoder(w).Encode(map[string]string{"status": status})
+}
+
+func scanReportHandler(w http.ResponseWriter, r *http.Request) {
+	params := mux.Vars(r)
+	report, err := scanningService.GetScanReport(params["scan_id"])
+
+	w.Header().Add("Content-Type", "application/json")
+
+	if err != nil {
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to get scan report"})
+	} else {
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(report)
+	}
+}
+
+func healthzHandler(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("OK"))
 }
 
 func corsMiddleware(r *mux.Router) mux.MiddlewareFunc {
@@ -78,20 +112,34 @@ func corsMiddleware(r *mux.Router) mux.MiddlewareFunc {
 	}
 }
 
+func corsOptionHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS, PUT, DELETE")
+	w.Header().Set("Access-Control-Allow-Headers", "Accept, Content-Type, Content-Length")
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func main() {
 	initLogger()
 	scanningService.Init()
 
 	r := mux.NewRouter()
 	r.HandleFunc("/", indexHandler)
+	r.HandleFunc("/healthz", healthzHandler)
 	r.HandleFunc("/version", versionHandler).Methods("GET")
-	r.HandleFunc("/scans/{scan_id}", default404Handler).Methods("GET")
-	r.HandleFunc("/scans/{scan_id}", default404Handler).Methods("DELETE")
+	r.HandleFunc("/scans/{scan_id}/status", scanStatusHandler).Methods("GET")
+	r.HandleFunc("/scans/{scan_id}", scanReportHandler).Methods("GET")
 	r.HandleFunc("/scans", scanSubmissionHandler).Methods("POST")
+	r.Methods("OPTIONS").HandlerFunc(corsOptionHandler)
 	r.Use(corsMiddleware(r))
 
 	loggingRouter := handlers.LoggingHandler(os.Stdout, r)
 
 	log.Infof("Starting HTTP server on %s", getListenerString())
-	http.ListenAndServe(getListenerString(), loggingRouter)
+	err := http.ListenAndServe(getListenerString(), loggingRouter)
+
+	if err != nil {
+		log.Errorf("Failed to listen to local address, error; %#v", err)
+	}
 }
